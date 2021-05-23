@@ -8,6 +8,7 @@ from spotipy.oauth2 import SpotifyOAuth
 
 SONGS_SENT_PER_REQUEST = 95  # Must be less than 100
 MAX_SONGS_DIRECTLY_REQUESTED = 300
+NAME_PREFIX = "Spotized - "
 SCOPE = "user-library-read, " \
         "streaming, " \
         "user-follow-read, " \
@@ -19,8 +20,94 @@ SCOPE = "user-library-read, " \
         "user-read-currently-playing"
 
 
-def create_new_playlist():
-    sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=SCOPE))
+def get_artist(sp: spotipy.client.Spotify):
+    search_items = []
+    while len(search_items) == 0:
+        requested_artist = input('What artist would you like to make a playlist for: ')
+        search_result = sp.search('artist:' + requested_artist, type='artist')
+        search_items = search_result['artists']['items']
+        if len(search_items) == 0:
+            print("**  Unable to find desired artist in the given search **")
+    if len(search_items) > 1:
+        for artist in search_items:
+            response = input("Were you looking for " + artist['name'] + "? (y/n/q) ")
+            if response.lower() == 'y' or response.lower() == '1':
+                return artist
+            if response.lower() == 'q':
+                print("Quiting Program..")
+                exit(0)
+        print("**  Unable to find desired artist in the given search **")
+        return None
+    else:
+        return search_items[0]
+
+
+def get_artists(sp: spotipy.client.Spotify):
+    all_artists = []
+    while len(all_artists) == 0:
+        artist = get_artist(sp)
+        if artist:
+            all_artists.append(artist)
+
+    finished_adding_artists = False
+    while not finished_adding_artists:
+        done_adding_response = input("Would you like to add more artists to base your playlist off? (y/n) ")
+        if done_adding_response.lower() == 'y':
+            artist = get_artist(sp)
+            if artist and artist not in all_artists:
+                all_artists.append(artist)
+        else:
+            finished_adding_artists = True
+
+    print(
+        ">> Playlist will be based on the following artist(s): " + ", ".join(get_list_properties(all_artists, 'name'))
+    )
+    return all_artists
+
+
+def get_time_length_songs(sp: spotipy.client.Spotify, artists: list):
+    successful_time_input = False
+    amount_of_time = 90
+    while not successful_time_input:
+        try:
+            amount_of_time = int(input("How long would you like your playlist to be? Enter in whole minutes: "))
+            successful_time_input = True
+        except ValueError:
+            pass
+    amount_of_time *= 60000
+    song_time_so_far = 0
+    tracks = []
+    while song_time_so_far < amount_of_time:
+        recommended = sp.recommendations(seed_artists=artists)
+        for track in recommended['tracks']:
+            if song_time_so_far >= amount_of_time:
+                break
+            if track['uri'] not in tracks:
+                tracks.append(track['uri'])
+                song_time_so_far += track['duration_ms']
+    return tracks
+
+
+def is_device_available(sp: spotipy.client.Spotify):
+    for device in sp.devices()['devices']:
+        if device['is_active']:
+            return True
+    return False
+
+
+def wait_for_active_device(sp: spotipy.client.Spotify):
+    while not is_device_available(sp):
+        print("Please launch Spotify on an app and initiate playback on that device")
+        retry_response = input("Press any key to attempt playing playlist or \"q\" to quit")
+        if retry_response.lower() == 'q':
+            exit(0)
+
+
+def get_list_properties(collection: list, key: str):
+    return [x[key] for x in collection]
+
+
+def create_new_playlist(sp: spotipy.client.Spotify):
     artists = get_artists(sp)
     artist_names = get_list_properties(artists, 'name')
     artist_uris = get_list_properties(artists, 'uri')
@@ -49,7 +136,7 @@ def create_new_playlist():
 
     playlist = sp.user_playlist_create(
         sp.current_user()['id'],
-        ("Jams - " + ", ".join(artist_names))[:99],
+        (NAME_PREFIX + ", ".join(artist_names))[:99],
         public=True,
         collaborative=False,
         description="Auto generated on " + datetime.datetime.now().strftime('%m/%d/%Y, %I:%M:%S %p')
@@ -69,102 +156,45 @@ def create_new_playlist():
     if start_response.lower() == 'n':
         return
     shuffle_response = input('Would you like to shuffle the music? (y/n) ')
-    successful_playback = False
     wait_for_active_device(sp)
-    while not successful_playback:
-        sp.shuffle(shuffle_response.lower() == 'y')
-        sp.start_playback(context_uri=playlist['uri'])
-        successful_playback = True
+    sp.shuffle(shuffle_response.lower() == 'y')
+    sp.start_playback(context_uri=playlist['uri'])
+    print('>> Playback has been started')
 
 
-def get_artist(sp):
-    search_items = []
-    while len(search_items) == 0:
-        requested_artist = input('What artist would you like to make a playlist for: ')
-        search_result = sp.search('artist:' + requested_artist, type='artist')
-        search_items = search_result['artists']['items']
-        if len(search_items) == 0:
-            print("**  Unable to find desired artist in the given search **")
-    if len(search_items) > 1:
-        for artist in search_items:
-            response = input("Were you looking for " + artist['name'] + "? (y/n/q) ")
-            if response.lower() == 'y' or response.lower() == '1':
-                return artist
-            if response.lower() == 'q':
-                print("Quiting Program..")
-                exit(0)
-        print("**  Unable to find desired artist in the given search **")
-        return None
-    else:
-        return search_items[0]
+def delete_automated_playlists(sp: spotipy.client.Spotify):
+    playlists = sp.current_user_playlists()
+    selected_playlists = []
+    for playlist in playlists['items']:
+        if 'Auto generated on ' in playlist['description'] or NAME_PREFIX in playlist['name']:
+            selected_playlists.append(playlist)
 
+    if len(selected_playlists) == 0:
+        print("No playlists were found to delete")
+        return
 
-def get_artists(sp):
-    all_artists = []
-    while len(all_artists) == 0:
-        artist = get_artist(sp)
-        if artist:
-            all_artists.append(artist)
+    print("The following playlists will be deleted: " + ", ".join(get_list_properties(selected_playlists, 'name')))
 
-    finished_adding_artists = False
-    while not finished_adding_artists:
-        done_adding_response = input("Would you like to add more artists to base your playlist off? (y/n) ")
-        if done_adding_response.lower() == 'y':
-            artist = get_artist(sp)
-            if artist and artist not in all_artists:
-                all_artists.append(artist)
-        else:
-            finished_adding_artists = True
+    taken_action = False
+    while not taken_action:
+        confirmation_response = input(
+            "Confirm that these playlists should be permanently "
+            "DELETED by typing \"Delete All Playlists\" or \"q\" to quit \n>> "
+        )
 
-    print(
-        ">> Playlist will be based on the following artist(s): " + ", ".join(get_list_properties(all_artists, 'name'))
-    )
-    return all_artists
-
-
-def get_time_length_songs(sp, artists: list):
-    successful_time_input = False
-    amount_of_time = 90
-    while not successful_time_input:
-        try:
-            amount_of_time = int(input("How long would you like your playlist to be? Enter in whole minutes: "))
-            successful_time_input = True
-        except ValueError:
-            pass
-    amount_of_time *= 60000
-    song_time_so_far = 0
-    tracks = []
-    while song_time_so_far < amount_of_time:
-        recommended = sp.recommendations(seed_artists=artists)
-        for track in recommended['tracks']:
-            if song_time_so_far >= amount_of_time:
-                break
-            if track['uri'] not in tracks:
-                tracks.append(track['uri'])
-                song_time_so_far += track['duration_ms']
-    return tracks
-
-
-def is_device_available(sp):
-    for device in sp.devices()['devices']:
-        print(device)
-        if device['is_active']:
-            return True
-    return False
-
-
-def wait_for_active_device(sp):
-    while not is_device_available(sp):
-        print("Please launch Spotify on an app and initiate playback on that device")
-        retry_response = input("Press any key to attempt playing playlist or \"q\" to quit")
-        if retry_response.lower() == 'q':
-            exit(0)
-
-
-def get_list_properties(collection: list, key: str):
-    return [x[key] for x in collection]
+        if confirmation_response == 'Delete All Playlists':
+            for playlist in selected_playlists:
+                sp.current_user_unfollow_playlist(playlist_id=playlist['id'])
+            print(str(len(selected_playlists)) + ' playlist(s) deleted')
+            taken_action = True
+        elif confirmation_response == 'q':
+            print("Playlists were NOT deleted")
+            taken_action = True
 
 
 if __name__ == '__main__':
     load_dotenv()
-    create_new_playlist()
+    sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=SCOPE))
+    # create_new_playlist(sp)
+    delete_automated_playlists(sp)
+    input("Press Enter to Quit")
